@@ -1,0 +1,133 @@
+--// PHN HUB - SERVER HOP 1-2 NGƯỜI
+
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+
+local Player = Players.LocalPlayer
+local PlaceId = game.PlaceId
+
+-- GUI
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "PHN_HUB"
+Gui.ResetOnSpawn = false
+Gui.Parent = game:GetService("CoreGui")
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 245, 0, 125)
+Frame.Position = UDim2.new(0.5, -122, 0.5, -62)
+Frame.BackgroundColor3 = Color3.fromRGB(255, 105, 180)
+Frame.BorderSizePixel = 0
+Frame.Active = true
+Frame.Draggable = true
+Frame.Parent = Gui
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 16)
+Corner.Parent = Frame
+
+local Stroke = Instance.new("UIStroke")
+Stroke.Color = Color3.fromRGB(255, 220, 240)
+Stroke.Thickness = 2
+Stroke.Parent = Frame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 42)
+Title.BackgroundTransparency = 1
+Title.Text = "💗 PHN HUB"
+Title.TextColor3 = Color3.new(1, 1, 1)
+Title.TextSize = 20
+Title.Font = Enum.Font.GothamBold
+Title.Parent = Frame
+
+local Hop = Instance.new("TextButton")
+Hop.Size = UDim2.new(1, -20, 0, 50)
+Hop.Position = UDim2.new(0, 10, 0, 55)
+Hop.BackgroundColor3 = Color3.fromRGB(255, 20, 147)
+Hop.Text = "👥 HOP SERVER 1–2 NGƯỜI"
+Hop.TextColor3 = Color3.new(1, 1, 1)
+Hop.TextSize = 15
+Hop.Font = Enum.Font.GothamBold
+Hop.Parent = Frame
+
+local ButtonCorner = Instance.new("UICorner")
+ButtonCorner.CornerRadius = UDim.new(0, 10)
+ButtonCorner.Parent = Hop
+
+local function HopServer()
+    Hop.Text = "🔎 ĐANG TÌM..."
+
+    local Success, Result = pcall(function()
+        return HttpService:JSONDecode(
+            game:HttpGet(
+                "https://games.roblox.com/v1/games/"
+                .. PlaceId ..
+                "/servers/Public?sortOrder=Asc&limit=100"
+            )
+        )
+    end)
+
+    if not Success or not Result or not Result.data then
+        Hop.Text = "❌ LỖI"
+        task.wait(2)
+        Hop.Text = "👥 HOP SERVER 1–2 NGƯỜI"
+        return
+    end
+
+    local Targets = {}
+
+    -- Ưu tiên server 1-2 người
+    for _, Server in ipairs(Result.data) do
+        if Server.id ~= game.JobId
+        and Server.playing >= 1
+        and Server.playing <= 2
+        and Server.playing < Server.maxPlayers then
+            table.insert(Targets, Server)
+        end
+    end
+
+    if #Targets > 0 then
+        local Target = Targets[math.random(1, #Targets)]
+
+        Hop.Text = "🚀 ĐANG VÀO..."
+
+        TeleportService:TeleportToPlaceInstance(
+            PlaceId,
+            Target.id,
+            Player
+        )
+    else
+        -- Nếu không có server 1-2 người
+        -- chọn server ít người nhất
+        local Fallback
+
+        for _, Server in ipairs(Result.data) do
+            if Server.id ~= game.JobId
+            and Server.playing < Server.maxPlayers then
+
+                if not Fallback
+                or Server.playing < Fallback.playing then
+                    Fallback = Server
+                end
+            end
+        end
+
+        if Fallback then
+            Hop.Text = "🔄 ĐANG VÀO SERVER ÍT NGƯỜI..."
+
+            TeleportService:TeleportToPlaceInstance(
+                PlaceId,
+                Fallback.id,
+                Player
+            )
+        else
+            Hop.Text = "❌ KHÔNG TÌM THẤY SERVER"
+            task.wait(2)
+            Hop.Text = "👥 HOP SERVER 1–2 NGƯỜI"
+        end
+    end
+end
+
+Hop.MouseButton1Click:Connect(HopServer)
+
+print("💗 PHN HUB LOADED")
