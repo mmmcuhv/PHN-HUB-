@@ -1,0 +1,695 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Camera = Workspace.CurrentCamera
+
+-- Dọn dẹp GUI cũ nếu chạy lại
+pcall(function()
+	local old = PlayerGui:FindFirstChild("PHN_HUB_Lite")
+	if old then old:Destroy() end
+end)
+
+-- Thay "rbxassetid://0" bằng Asset ID của hình đã upload lên Roblox
+local MENU_ICON_IMAGE = "rbxassetid://0"
+
+local ESP_WHITE_BOLD = Color3.fromRGB(220, 220, 220)
+local SKELETON_WHITE = Color3.fromRGB(255, 255, 255)
+local SKELETON_THICKNESS = 2.8
+
+local SKELETON_BONES = {
+	{ "Head", "UpperTorso" },
+	{ "UpperTorso", "LowerTorso" },
+	{ "UpperTorso", "LeftUpperArm" },
+	{ "LeftUpperArm", "LeftLowerArm" },
+	{ "LeftLowerArm", "LeftHand" },
+	{ "UpperTorso", "RightUpperArm" },
+	{ "RightUpperArm", "RightLowerArm" },
+	{ "RightLowerArm", "RightHand" },
+	{ "LowerTorso", "LeftUpperLeg" },
+	{ "LeftUpperLeg", "LeftLowerLeg" },
+	{ "LeftLowerLeg", "LeftFoot" },
+	{ "LowerTorso", "RightUpperLeg" },
+	{ "RightUpperLeg", "RightLowerLeg" },
+	{ "RightLowerLeg", "RightFoot" },
+	-- Hỗ trợ nhân vật R6
+	{ "Head", "Torso" },
+	{ "Torso", "Left Arm" },
+	{ "Torso", "Right Arm" },
+	{ "Torso", "Left Leg" },
+	{ "Torso", "Right Leg" },
+}
+
+local State = {
+	MenuOpen = true,
+	ESPCombined = true, -- Gộp ESP Line + ESP Box + ESP Xương
+	AimFOV = false, -- Aimbot vòng FOV giữa màn hình
+	AimPart = "Head", -- "Head" hoặc "HRP"
+	StickyLock = true, -- Ghim chặt mục tiêu đã khóa
+	AutoBehind = false, -- Tự động đứng sau lưng và ghim chặt
+	BehindDistance = 4.5, -- Khoảng cách đứng sau lưng mục tiêu (studs)
+	FOVRadius = 180,
+	Smooth = 2.00,
+	WallCheck = true, -- Chỉ aim/ghim khi nhìn thấy người chơi, không xuyên tường
+}
+
+local LockedTargetPart = nil
+local LockedTargetChar = nil
+local LockedTargetPlr = nil
+
+local function ClearLockedTarget()
+	LockedTargetPart = nil
+	LockedTargetChar = nil
+	LockedTargetPlr = nil
+end
+
+local function IsTargetSeenByCamera(char, part)
+	if not char or not char.Parent or not part or not part.Parent then
+		return false
+	end
+	local origin = Camera.CFrame.Position
+	local delta = part.Position - origin
+	if delta.Magnitude <= 0.05 then return true end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ex = {}
+	if LocalPlayer.Character then table.insert(ex, LocalPlayer.Character) end
+	table.insert(ex, char)
+	params.FilterDescendantsInstances = ex
+	params.IgnoreWater = true
+
+	return Workspace:Raycast(origin, delta.Unit * delta.Magnitude, params) == nil
+end
+
+local function ComputeBehindPosition(targetHrp)
+	local look = targetHrp.CFrame.LookVector
+	local flatLook = Vector3.new(look.X, 0, look.Z)
+	if flatLook.Magnitude < 0.01 then
+		flatLook = Vector3.new(0, 0, -1)
+	else
+		flatLook = flatLook.Unit
+	end
+	return targetHrp.Position - flatLook * State.BehindDistance
+end
+
+local function GetAimPart(char)
+	if not char then return nil end
+	if State.AimPart == "HRP" then
+		return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Head")
+	end
+	return char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso")
+end
+
+local function ShouldIgnorePlayer(plr)
+	return not plr or plr == LocalPlayer
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "PHN_HUB_Lite"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999999
+ScreenGui.Parent = PlayerGui
+
+local function MakeDrag(obj, handle)
+	local bar = handle or obj
+	local dragging, startInput, startPos = false, nil, nil
+
+	bar.InputBegan:Connect(function(inp)
+		if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			startInput = inp.Position
+			startPos = obj.Position
+			inp.Changed:Connect(function()
+				if inp.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(inp)
+		if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+			local d = inp.Position - startInput
+			obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end)
+end
+
+-- Nút hình tròn 64x64 bật/tắt menu + chữ PHN ở giữa
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0, 64, 0, 64)
+ToggleBtn.Position = UDim2.new(0.03, 0, 0.14, 0)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+ToggleBtn.Text = ""
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = ScreenGui
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(1, 0)
+
+local ToggleStroke = Instance.new("UIStroke")
+ToggleStroke.Thickness = 2
+ToggleStroke.Color = Color3.fromRGB(0, 170, 255)
+ToggleStroke.Parent = ToggleBtn
+
+local ToggleIcon = Instance.new("ImageLabel")
+ToggleIcon.Size = UDim2.new(1, 0, 1, 0)
+ToggleIcon.Position = UDim2.new(0, 0, 0, 0)
+ToggleIcon.BackgroundTransparency = 1
+ToggleIcon.Image = MENU_ICON_IMAGE
+ToggleIcon.ScaleType = Enum.ScaleType.Crop
+ToggleIcon.ZIndex = 1
+ToggleIcon.Parent = ToggleBtn
+Instance.new("UICorner", ToggleIcon).CornerRadius = UDim.new(1, 0)
+
+local function FitFaceInCircle(imgLabel, texW, texH)
+	imgLabel.ImageRectOffset = Vector2.new(math.floor(texW * 0.11), math.floor(texH * 0.08))
+	imgLabel.ImageRectSize = Vector2.new(math.floor(texW * 0.42), math.floor(texH * 0.78))
+end
+
+FitFaceInCircle(ToggleIcon, 1200, 800)
+
+local ToggleLabel = Instance.new("TextLabel")
+ToggleLabel.Size = UDim2.new(1, 0, 1, 0)
+ToggleLabel.Position = UDim2.new(0, 0, 0, 0)
+ToggleLabel.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+ToggleLabel.BackgroundTransparency = 0.45
+ToggleLabel.Text = "PHN"
+ToggleLabel.TextColor3 = Color3.new(1, 1, 1)
+ToggleLabel.TextXAlignment = Enum.TextXAlignment.Center
+ToggleLabel.TextYAlignment = Enum.TextYAlignment.Center
+ToggleLabel.Font = Enum.Font.GothamBlack
+ToggleLabel.TextSize = 14
+ToggleLabel.ZIndex = 2
+ToggleLabel.Parent = ToggleBtn
+Instance.new("UICorner", ToggleLabel).CornerRadius = UDim.new(1, 0)
+
+local ToggleLabelStroke = Instance.new("UIStroke")
+ToggleLabelStroke.Thickness = 1.5
+ToggleLabelStroke.Color = Color3.fromRGB(0, 0, 0)
+ToggleLabelStroke.Parent = ToggleLabel
+
+MakeDrag(ToggleBtn)
+
+-- Khung menu gọn giữa màn hình (cao 258px)
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 244, 0, 258)
+MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+MainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.Visible = State.MenuOpen
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 10)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundColor3 = Color3.fromRGB(36, 36, 46)
+Title.Text = "PHN HUB • ALL ESP & AIM"
+Title.TextColor3 = Color3.new(1, 1, 1)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 11
+Title.Parent = MainFrame
+Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 10)
+MakeDrag(MainFrame, Title)
+
+local function SetOpen(v)
+	State.MenuOpen = v
+	if v then
+		MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+		MainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+	end
+	MainFrame.Visible = v
+	ToggleStroke.Color = v and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(110, 115, 130)
+	ToggleIcon.ImageColor3 = v and Color3.new(1, 1, 1) or Color3.fromRGB(145, 145, 155)
+	ToggleLabel.TextColor3 = v and Color3.new(1, 1, 1) or Color3.fromRGB(185, 190, 205)
+end
+
+SetOpen(State.MenuOpen)
+
+ToggleBtn.MouseButton1Click:Connect(function()
+	SetOpen(not State.MenuOpen)
+end)
+
+local function AddToggle(label, y, init, cb)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(0.92, 0, 0, 26)
+	b.Position = UDim2.new(0.04, 0, 0, y)
+	b.Font = Enum.Font.GothamSemibold
+	b.TextSize = 11
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Parent = MainFrame
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+	local on = init or false
+	local function Paint()
+		b.Text = label .. (on and ": BẬT" or ": TẮT")
+		b.BackgroundColor3 = on and Color3.fromRGB(0, 170, 105) or Color3.fromRGB(45, 45, 56)
+	end
+	Paint()
+
+	b.MouseButton1Click:Connect(function()
+		on = not on
+		Paint()
+		if cb then cb(on) end
+	end)
+end
+
+local function AddAimPartSwitch(y)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(0.92, 0, 0, 26)
+	b.Position = UDim2.new(0.04, 0, 0, y)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 11
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Parent = MainFrame
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+	local function Paint()
+		local isHead = (State.AimPart == "Head")
+		b.Text = "Mục tiêu: " .. (isHead and "ĐẦU (Head)" or "THÂN (HRP)")
+		b.BackgroundColor3 = isHead and Color3.fromRGB(210, 110, 35) or Color3.fromRGB(55, 95, 190)
+	end
+	Paint()
+
+	b.MouseButton1Click:Connect(function()
+		State.AimPart = (State.AimPart == "Head") and "HRP" or "Head"
+		ClearLockedTarget()
+		Paint()
+	end)
+end
+
+local function AddStepperRow(y, minusText, plusText, formatFn, onStep)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(0.92, 0, 0, 26)
+	row.Position = UDim2.new(0.04, 0, 0, y)
+	row.BackgroundTransparency = 1
+	row.Parent = MainFrame
+
+	local decBtn = Instance.new("TextButton")
+	decBtn.Size = UDim2.new(0.24, 0, 1, 0)
+	decBtn.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+	decBtn.Text = minusText
+	decBtn.TextColor3 = Color3.new(1, 1, 1)
+	decBtn.Font = Enum.Font.GothamBold
+	decBtn.TextSize = 11
+	decBtn.Parent = row
+	Instance.new("UICorner", decBtn).CornerRadius = UDim.new(0, 6)
+
+	local valLbl = Instance.new("TextLabel")
+	valLbl.Size = UDim2.new(0.48, 0, 1, 0)
+	valLbl.Position = UDim2.new(0.26, 0, 0, 0)
+	valLbl.BackgroundColor3 = Color3.fromRGB(36, 36, 46)
+	valLbl.Text = formatFn()
+	valLbl.TextColor3 = Color3.new(1, 1, 1)
+	valLbl.Font = Enum.Font.GothamBold
+	valLbl.TextSize = 11
+	valLbl.Parent = row
+	Instance.new("UICorner", valLbl).CornerRadius = UDim.new(0, 6)
+
+	local incBtn = Instance.new("TextButton")
+	incBtn.Size = UDim2.new(0.24, 0, 1, 0)
+	incBtn.Position = UDim2.new(0.76, 0, 0, 0)
+	incBtn.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+	incBtn.Text = plusText
+	incBtn.TextColor3 = Color3.new(1, 1, 1)
+	incBtn.Font = Enum.Font.GothamBold
+	incBtn.TextSize = 11
+	incBtn.Parent = row
+	Instance.new("UICorner", incBtn).CornerRadius = UDim.new(0, 6)
+
+	local function Refresh()
+		valLbl.Text = formatFn()
+	end
+
+	decBtn.MouseButton1Click:Connect(function()
+		onStep(-1)
+		Refresh()
+	end)
+	incBtn.MouseButton1Click:Connect(function()
+		onStep(1)
+		Refresh()
+	end)
+
+	return Refresh
+end
+
+local y = 36
+local dy = 30
+
+AddToggle("ESP (Line+Box+Xương)", y, State.ESPCombined, function(v)
+	State.ESPCombined = v
+end)
+y += dy
+
+AddToggle("Aimbot FOV", y, State.AimFOV, function(v)
+	State.AimFOV = v
+	if not v and not State.AutoBehind then
+		ClearLockedTarget()
+	end
+end)
+y += dy
+
+AddAimPartSwitch(y)
+y += dy
+
+AddToggle("Ghim Chặt", y, State.StickyLock, function(v)
+	State.StickyLock = v
+	if not v and not State.AutoBehind then
+		ClearLockedTarget()
+	end
+end)
+y += dy
+
+AddToggle("Tự Sau Lưng + Ghim", y, State.AutoBehind, function(v)
+	State.AutoBehind = v
+	if not v and not State.AimFOV then
+		ClearLockedTarget()
+	end
+end)
+y += dy
+
+AddStepperRow(y, "- Sm", "+ Sm", function()
+	return string.format("Sm: %.2f", State.Smooth)
+end, function(dir)
+	State.Smooth = math.clamp(math.floor((State.Smooth + dir * 0.05) * 100 + 0.5) / 100, 0.05, 2.0)
+end)
+y += dy
+
+local fovLblRefresher = AddStepperRow(y, "- FOV", "+ FOV", function()
+	return "FOV: " .. tostring(State.FOVRadius)
+end, function(dir)
+	State.FOVRadius = math.clamp(State.FOVRadius + dir * 25, 50, 450)
+end)
+fovLblRefresher()
+
+-- Drawing ESP Line + Box + Xương + Vòng FOV
+local HasDrawing = false
+pcall(function()
+	if typeof(Drawing) == "table" and typeof(Drawing.new) == "function" then
+		local t = Drawing.new("Line")
+		if t then t:Remove(); HasDrawing = true end
+	end
+end)
+
+local FOVCircle = nil
+local ESPMap = {}
+local SkeletonMap = {}
+
+if HasDrawing then
+	pcall(function()
+		FOVCircle = Drawing.new("Circle")
+		FOVCircle.Thickness = 1.8
+		FOVCircle.NumSides = 48
+		FOVCircle.Filled = false
+		FOVCircle.Visible = false
+	end)
+end
+
+local function HideSkeleton(plr)
+	local lines = SkeletonMap[plr]
+	if not lines then return end
+	pcall(function()
+		for _, ln in ipairs(lines) do
+			ln.Visible = false
+		end
+	end)
+end
+
+local function ClearSkeleton(plr)
+	local lines = SkeletonMap[plr]
+	if not lines then return end
+	pcall(function()
+		for _, ln in ipairs(lines) do
+			ln:Remove()
+		end
+	end)
+	SkeletonMap[plr] = nil
+end
+
+local function GetSkeletonLines(plr)
+	if not HasDrawing then return nil end
+	if SkeletonMap[plr] then return SkeletonMap[plr] end
+	local ok, created = pcall(function()
+		local arr = {}
+		for i = 1, #SKELETON_BONES do
+			local ln = Drawing.new("Line")
+			ln.Thickness = SKELETON_THICKNESS
+			ln.Color = SKELETON_WHITE
+			ln.Visible = false
+			arr[i] = ln
+		end
+		return arr
+	end)
+	if ok and created then
+		SkeletonMap[plr] = created
+		return created
+	end
+	return nil
+end
+
+local function UpdateSkeleton(plr, char, enabled)
+	if not enabled or not HasDrawing or not char or not char.Parent then
+		HideSkeleton(plr)
+		return
+	end
+	local lines = GetSkeletonLines(plr)
+	if not lines then return end
+
+	pcall(function()
+		for i, bone in ipairs(SKELETON_BONES) do
+			local ln = lines[i]
+			local pA = char:FindFirstChild(bone[1])
+			local pB = char:FindFirstChild(bone[2])
+			if pA and pB and pA:IsA("BasePart") and pB:IsA("BasePart") then
+				local spA, visA = Camera:WorldToViewportPoint(pA.Position)
+				local spB, visB = Camera:WorldToViewportPoint(pB.Position)
+				if (visA or visB) and spA.Z > 0 and spB.Z > 0 then
+					ln.From = Vector2.new(spA.X, spA.Y)
+					ln.To = Vector2.new(spB.X, spB.Y)
+					ln.Thickness = SKELETON_THICKNESS
+					ln.Color = SKELETON_WHITE
+					ln.Visible = true
+				else
+					ln.Visible = false
+				end
+			else
+				ln.Visible = false
+			end
+		end
+	end)
+end
+
+local function HideESP(e)
+	if not e then return end
+	pcall(function()
+		if e.Box then e.Box.Visible = false end
+		if e.Line then e.Line.Visible = false end
+	end)
+end
+
+local function ClearESP(plr)
+	local e = ESPMap[plr]
+	if e then
+		pcall(function()
+			if e.Box then e.Box:Remove() end
+			if e.Line then e.Line:Remove() end
+		end)
+		ESPMap[plr] = nil
+	end
+	ClearSkeleton(plr)
+end
+
+local function GetESP(plr)
+	if not HasDrawing then return nil end
+	if ESPMap[plr] then return ESPMap[plr] end
+	local ok, res = pcall(function()
+		local box = Drawing.new("Square")
+		box.Thickness = 1.8
+		box.Filled = false
+		box.Color = ESP_WHITE_BOLD
+		box.Visible = false
+
+		local line = Drawing.new("Line")
+		line.Thickness = 1.7
+		line.Color = ESP_WHITE_BOLD
+		line.Visible = false
+
+		return { Box = box, Line = line }
+	end)
+	if ok and res then
+		ESPMap[plr] = res
+		return res
+	end
+	return nil
+end
+
+local function IsVisible(char, part)
+	if not State.WallCheck then return true end
+	return IsTargetSeenByCamera(char, part)
+end
+
+local function IsTargetValidForLock(plr, char, part, ignoreWall, maxRadius, center)
+	if ShouldIgnorePlayer(plr) then
+		return false
+	end
+	if not char or not char.Parent or not part or not part.Parent then
+		return false
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then
+		return false
+	end
+	local preferredPart = GetAimPart(char)
+	if preferredPart and part ~= preferredPart then
+		part = preferredPart
+		LockedTargetPart = preferredPart
+	end
+	if not ignoreWall and not IsVisible(char, part) then
+		return false
+	end
+	if center and maxRadius then
+		local sp, vis = Camera:WorldToViewportPoint(part.Position)
+		if not vis or sp.Z <= 0 then
+			return false
+		end
+		if (Vector2.new(sp.X, sp.Y) - center).Magnitude > maxRadius then
+			return false
+		end
+	end
+	return true
+end
+
+local function FindTargetInFOV(center)
+	if State.StickyLock and IsTargetValidForLock(LockedTargetPlr, LockedTargetChar, LockedTargetPart, false, State.FOVRadius, center) then
+		return LockedTargetPart
+	end
+	ClearLockedTarget()
+
+	local bestPart = nil
+	local bestChar = nil
+	local bestPlr = nil
+	local bestDist = State.FOVRadius
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if not ShouldIgnorePlayer(plr) and plr.Character then
+			local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+			local part = GetAimPart(plr.Character)
+			if hum and hum.Health > 0 and part then
+				local sp, vis = Camera:WorldToViewportPoint(part.Position)
+				if vis and sp.Z > 0 then
+					local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+					if d <= bestDist and IsVisible(plr.Character, part) then
+						bestDist = d
+						bestPart = part
+						bestChar = plr.Character
+						bestPlr = plr
+					end
+				end
+			end
+		end
+	end
+
+	if bestPart and State.StickyLock then
+		LockedTargetPart = bestPart
+		LockedTargetChar = bestChar
+		LockedTargetPlr = bestPlr
+	end
+	return bestPart
+end
+
+local function FindNearestMapTarget(ignoreWall)
+	if State.StickyLock and IsTargetValidForLock(LockedTargetPlr, LockedTargetChar, LockedTargetPart, ignoreWall, nil, nil) then
+		local lHrp = LockedTargetChar:FindFirstChild("HumanoidRootPart") or LockedTargetChar:FindFirstChild("Head")
+		if lHrp then
+			return LockedTargetPlr, LockedTargetChar, lHrp, LockedTargetPart
+		end
+	end
+	ClearLockedTarget()
+
+	local myChar = LocalPlayer.Character
+	local myHrp = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
+	if not myHrp then return nil, nil, nil, nil end
+
+	local bestPlr, bestChar, bestHrp, bestAimPart = nil, nil, nil, nil
+	local nearestDist = math.huge
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if not ShouldIgnorePlayer(plr) and plr.Character then
+			local pHum = plr.Character:FindFirstChildOfClass("Humanoid")
+			local pHrp = plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character:FindFirstChild("Head")
+			local pAim = GetAimPart(plr.Character)
+			if pHum and pHum.Health > 0 and pHrp and pAim then
+				if ignoreWall or IsVisible(plr.Character, pAim) then
+					local d = (pHrp.Position - myHrp.Position).Magnitude
+					if d < nearestDist then
+						nearestDist = d
+						bestPlr = plr
+						bestChar = plr.Character
+						bestHrp = pHrp
+						bestAimPart = pAim
+					end
+				end
+			end
+		end
+	end
+
+	if bestPlr and bestChar and bestHrp and bestAimPart then
+		LockedTargetPlr = bestPlr
+		LockedTargetChar = bestChar
+		LockedTargetPart = bestAimPart
+		return bestPlr, bestChar, bestHrp, bestAimPart
+	end
+
+	return nil, nil, nil, nil
+end
+
+local function GetBehindTarget()
+	return FindNearestMapTarget(true)
+end
+
+Players.PlayerRemoving:Connect(function(plr)
+	ClearESP(plr)
+	if plr == LockedTargetPlr then
+		ClearLockedTarget()
+	end
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	Camera = Workspace.CurrentCamera or Camera
+	if not Camera then return end
+
+	local vp = Camera.ViewportSize
+	local center = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+	local now = os.clock()
+	local rainbowFOV = Color3.fromHSV((now * 0.28) % 1, 0.9, 1)
+
+	if FOVCircle then
+		pcall(function()
+			FOVCircle.Position = center
+			FOVCircle.Radius = State.FOVRadius
+			FOVCircle.Color = rainbowFOV
+			FOVCircle.Visible = State.AimFOV
+		end)
+	end
+
+	if HasDrawing then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if ShouldIgnorePlayer(plr) or not plr.Character then
+				HideESP(ESPMap[plr])
+				HideSkeleton(plr)
+			else
+				local char = plr.Character
+				local hum = char:FindFirstChildOfClass("Humanoid")
+				local hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Head")
+				if not hum or hum.Health <= 0 or not hrp or not State.ESPCombined then
+					HideESP(ESPMap[plr])
+					HideSkeleton(plr)
+				else
+					local e = GetESP(plr)
+					local rootPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+					if e and onScreen and rootPos.Z > 0 then
+						local top
