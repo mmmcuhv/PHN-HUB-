@@ -1,0 +1,707 @@
+-- PHN HUB | Delta Mobile | Fixed Center Custom UI
+-- Save Settings + Steady Head Lock & Smooth Trajectory Prediction + Rainbow FOV + ESP + Boosted Fix Lag + VI/EN Settings Tab
+
+local cloneref = cloneref or function(obj) return obj end
+local Players = cloneref(game:GetService("Players"))
+local RunService = cloneref(game:GetService("RunService"))
+local UserInputService = cloneref(game:GetService("UserInputService"))
+local Lighting = cloneref(game:GetService("Lighting"))
+local CoreGui = cloneref(game:GetService("CoreGui"))
+local HttpService = cloneref(game:GetService("HttpService"))
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ================= CLEANUP PATTERN =================
+local connections = {}
+local drawings = {}
+local instances = {}
+local extraCleanup = {}
+
+local function trackConn(conn: RBXScriptConnection): RBXScriptConnection
+	table.insert(connections, conn)
+	return conn
+end
+
+local function trackDraw(obj)
+	table.insert(drawings, obj)
+	return obj
+end
+
+local function trackInst(obj)
+	table.insert(instances, obj)
+	return obj
+end
+
+local function cleanup(fullUnload: boolean?)
+	if fullUnload == nil then fullUnload = true end
+	for _, conn in ipairs(connections) do
+		if conn and conn.Connected then
+			pcall(function() conn:Disconnect() end)
+		end
+	end
+	for _, draw in ipairs(drawings) do
+		pcall(function() draw:Remove() end)
+	end
+	for _, inst in ipairs(instances) do
+		pcall(function() inst:Destroy() end)
+	end
+	for _, fn in ipairs(extraCleanup) do
+		pcall(fn)
+	end
+	table.clear(connections)
+	table.clear(drawings)
+	table.clear(instances)
+	table.clear(extraCleanup)
+
+	if fullUnload then
+		local env = (getgenv and getgenv()) or _G
+		env.PHNHubCleanup = nil
+	end
+end
+
+local env = (getgenv and getgenv()) or _G
+if env.PHNHubCleanup then
+	pcall(env.PHNHubCleanup, false)
+end
+
+-- ================= ENVIRONMENT CHECKS =================
+local function getGuiParent()
+	if type(gethui) == "function" then
+		local ok, res = pcall(gethui)
+		if ok and typeof(res) == "Instance" then return res end
+	end
+	local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	return pg or CoreGui
+end
+
+local GuiParent = getGuiParent()
+local HasDrawing = pcall(function()
+	local d = Drawing.new("Line")
+	d:Remove()
+end)
+local HasFileSystem = type(writefile) == "function" and type(readfile) == "function"
+	and type(isfile) == "function" and type(makefolder) == "function" and type(isfolder) == "function"
+
+local function getCamera(): Camera?
+	return workspace.CurrentCamera
+end
+
+-- ================= CONFIG & TRANSLATIONS =================
+local DefaultConfig = {
+	Language = "VI", -- "VI" | "EN"
+
+	AimEnabled = false,
+	StickyAim = true,
+	StickyGrace = 0.45,
+	AimPart = "Head", -- "Head" | "Torso" | "HumanoidRootPart"
+	SmoothAimEnabled = true,
+	Smoothness = 0.42,
+	SmoothMode = "EaseOut", -- "EaseOut" | "Lerp" | "Spring"
+	LockRampTime = 0.08,
+	MaxTurnSpeed = 360,
+	FOV = 120,
+	FOVMin = 10,
+	FOVMax = 500,
+	VisibleCheck = true,
+	ShowFOV = true,
+	RainbowFOV = true,
+	RainbowSpeed = 0.45,
+
+	ESPEnabled = false,
+	ESPBox = true,
+	ESPLine = true,
+	ESPHealthBar = true,
+	ESPInfo = true,
+	ESPMaxDist = 1500,
+	LineOrigin = "Bottom", -- "Top" | "Center" | "Bottom"
+
+	FixLagEnabled = false,
+	HideSmallDecor = true,
+	DisableHeavyLight = true,
+	SimplifyMaterials = true,
+	DecorMaxSize = 10,
+
+	MenuKeybindEnabled = true,
+	AutoLoadSettings = true,
+}
+
+local Config = {}
+for k, v in pairs(DefaultConfig) do
+	Config[k] = v
+end
+
+local Translations = {
+	VI = {
+		NoFS = "Executor không hỗ trợ filesystem",
+		EncodeErr = "Lỗi mã hoá settings",
+		SaveOk = "Đã lưu settings",
+		SaveFail = "Lưu settings thất bại",
+		NoFile = "Chưa có file settings",
+		LoadOk = "Đã tải settings",
+		LangSwitched = "Đã đổi ngôn ngữ sang Tiếng Việt",
+		SubTitle = "Mobile Custom UI",
+		TabAim = "Aimbot",
+		TabEsp = "ESP",
+		TabLag = "Fix Lag",
+		TabSettings = "Cài Đặt",
+		EnableAim = "Bật Aimbot",
+		AimPart = "Vị Trí Khoá",
+		StickyAim = "Ghim Chặt Mục Tiêu",
+		SmoothAim = "Làm Mượt Ghim",
+		SmoothMode = "Kiểu Làm Mượt",
+		Smoothness = "Tốc Độ Ghim (%)",
+		MaxTurnSpeed = "Giới Hạn Xoay (deg/s)",
+		FovRadius = "Bán Kính FOV",
+		ShowFov = "Hiện Vòng FOV",
+		RainbowFov = "FOV Cầu Vồng",
+		VisibleCheck = "Kiểm Tra Tường Che",
+		EnableEsp = "Bật ESP",
+		EspBox = "Khung ESP (Box)",
+		TracerLine = "Đường Tracer",
+		TracerOrigin = "Điểm Xuất Phát Tracer",
+		HealthBar = "Thanh Máu",
+		PlayerInfo = "Thông Tin Người Chơi",
+		FixLag = "Bật Fix Lag Mạnh",
+		SimplifyMat = "Đơn Giản Vật Liệu",
+		HideDecor = "Ẩn Decor Nhỏ",
+		Language = "Ngôn Ngữ",
+		AutoLoad = "Tự Động Tải Settings",
+		SaveBtn = "Lưu Settings",
+		LoadBtn = "Tải Settings",
+		UnloadBtn = "Gỡ / Dọn Hub",
+	},
+	EN = {
+		NoFS = "Executor does not support filesystem",
+		EncodeErr = "Failed to encode settings",
+		SaveOk = "Settings saved",
+		SaveFail = "Failed to save settings",
+		NoFile = "No settings file found",
+		LoadOk = "Settings loaded",
+		LangSwitched = "Switched language to English",
+		SubTitle = "Mobile Custom UI",
+		TabAim = "Aimbot",
+		TabEsp = "ESP",
+		TabLag = "Fix Lag",
+		TabSettings = "Settings",
+		EnableAim = "Enable Aimbot",
+		AimPart = "Aim Part",
+		StickyAim = "Tight Target Lock",
+		SmoothAim = "Smooth Lock-On",
+		SmoothMode = "Smooth Curve",
+		Smoothness = "Lock Speed (%)",
+		MaxTurnSpeed = "Max Turn Speed (deg/s)",
+		FovRadius = "FOV Radius",
+		ShowFov = "Show FOV",
+		RainbowFov = "Rainbow FOV",
+		VisibleCheck = "Visible Check",
+		EnableEsp = "Enable ESP",
+		EspBox = "ESP Box",
+		TracerLine = "Tracer Line",
+		TracerOrigin = "Tracer Origin",
+		HealthBar = "Health Bar",
+		PlayerInfo = "Player Info",
+		FixLag = "Extended Fix Lag",
+		SimplifyMat = "Simplify Materials",
+		HideDecor = "Hide Small Decor",
+		Language = "Language",
+		AutoLoad = "Auto-Load Settings",
+		SaveBtn = "Save Settings",
+		LoadBtn = "Load Settings",
+		UnloadBtn = "Unload / Cleanup Hub",
+	},
+}
+
+local function tr(key: string, ...): string
+	local langTable = Translations[Config.Language] or Translations.VI
+	local text = langTable[key] or Translations.VI[key] or key
+	if select("#", ...) > 0 then
+		return string.format(text, ...)
+	end
+	return text
+end
+
+local State = {
+	MenuVisible = true,
+	ActiveTab = "Aim",
+	TargetKey = nil,
+	TargetChar = nil,
+	TargetPart = nil,
+	LockedSince = 0,
+	LostTargetAt = nil,
+	LastTargetPos = nil,
+	LastTargetTime = 0,
+	SmoothedVel = Vector3.zero,
+	SmoothedAimPoint = nil,
+	RainbowHue = 0,
+	LagBackup = nil,
+	LagAddedConn = nil,
+	DirtyEntities = true,
+}
+
+local UI = {
+	Gui = nil,
+	MainFrame = nil,
+	ToggleBtn = nil,
+	ToastLabel = nil,
+	RebuildFn = nil,
+}
+
+local function resetAimTracking()
+	State.LastTargetPos = nil
+	State.LastTargetTime = 0
+	State.SmoothedVel = Vector3.zero
+	State.SmoothedAimPoint = nil
+end
+
+local function setMenuVisible(visible: boolean)
+	State.MenuVisible = visible
+	if UI.MainFrame and UI.MainFrame.Parent then
+		UI.MainFrame.Visible = visible
+	end
+end
+
+-- ================= SETTINGS PERSISTENCE =================
+local SETTINGS_FOLDER = "PHNHUB"
+local SETTINGS_FILE = SETTINGS_FOLDER .. "/settings.json"
+
+local function notify(title: string, content: string)
+	if UI.ToastLabel and UI.ToastLabel.Parent then
+		UI.ToastLabel.Text = string.format("%s: %s", title, content)
+		UI.ToastLabel.Visible = true
+		task.delay(3, function()
+			if UI.ToastLabel and UI.ToastLabel.Parent then
+				UI.ToastLabel.Visible = false
+			end
+		end)
+	end
+end
+
+local function saveSettings()
+	if not HasFileSystem then
+		notify("PHN HUB", tr("NoFS"))
+		return false
+	end
+	if not isfolder(SETTINGS_FOLDER) then
+		pcall(makefolder, SETTINGS_FOLDER)
+	end
+	local data = {}
+	for k, v in pairs(Config) do
+		local t = type(v)
+		if t == "number" or t == "boolean" or t == "string" then
+			data[k] = v
+		end
+	end
+	local ok, json = pcall(function()
+		return HttpService:JSONEncode(data)
+	end)
+	if not ok then
+		notify("PHN HUB", tr("EncodeErr"))
+		return false
+	end
+	local wrote = pcall(writefile, SETTINGS_FILE, json)
+	notify("PHN HUB", wrote and tr("SaveOk") or tr("SaveFail"))
+	return wrote
+end
+
+local function loadSettings(silent: boolean?)
+	if not HasFileSystem or not isfile(SETTINGS_FILE) then
+		if not silent then notify("PHN HUB", tr("NoFile")) end
+		return false
+	end
+	local ok, raw = pcall(readfile, SETTINGS_FILE)
+	if not ok then return false end
+	local decOk, data = pcall(function()
+		return HttpService:JSONDecode(raw)
+	end)
+	if not decOk or type(data) ~= "table" then return false end
+	for k, v in pairs(data) do
+		if DefaultConfig[k] ~= nil and type(v) == type(DefaultConfig[k]) then
+			Config[k] = v
+		end
+	end
+	if Config.Language ~= "VI" and Config.Language ~= "EN" then
+		Config.Language = "VI"
+	end
+	if not silent then notify("PHN HUB", tr("LoadOk")) end
+	return true
+end
+
+if Config.AutoLoadSettings then
+	loadSettings(true)
+end
+
+-- ================= FOV CIRCLE (RAINBOW) =================
+local FovGui = trackInst(Instance.new("ScreenGui"))
+FovGui.Name = "PHNFovGui"
+FovGui.ResetOnSpawn = false
+FovGui.IgnoreGuiInset = true
+FovGui.DisplayOrder = 998
+FovGui.Parent = GuiParent
+
+local FovCircle = Instance.new("Frame")
+FovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FovCircle.Position = UDim2.fromScale(0.5, 0.5)
+FovCircle.BackgroundTransparency = 1
+FovCircle.BorderSizePixel = 0
+FovCircle.Visible = false
+FovCircle.Parent = FovGui
+
+local FovCorner = Instance.new("UICorner")
+FovCorner.CornerRadius = UDim.new(1, 0)
+FovCorner.Parent = FovCircle
+
+local FovStroke = Instance.new("UIStroke")
+FovStroke.Thickness = 2
+FovStroke.Color = Color3.fromHSV(0, 1, 1)
+FovStroke.Transparency = 0.15
+FovStroke.Parent = FovCircle
+
+local function setFov(value: number)
+	Config.FOV = math.clamp(math.floor(value + 0.5), Config.FOVMin, Config.FOVMax)
+	FovCircle.Size = UDim2.fromOffset(Config.FOV * 2, Config.FOV * 2)
+end
+setFov(Config.FOV)
+
+-- ================= FIX LAG TỐI ƯU FPS & ĐỒ HỌA =================
+local DecorKeywords = {
+	"decor", "decoration", "foliage", "grass", "bush", "shrub", "tree", "leaf", "leaves",
+	"prop", "props", "furniture", "trash", "debris", "vegetation", "flower", "rock", "pebble",
+	"effect", "fx", "particle", "spark", "smoke", "cloud",
+}
+
+local function isInsidePlayerCharacter(obj)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character and obj:IsDescendantOf(plr.Character) then
+			return true
+		end
+	end
+	return false
+end
+
+local function hasDecorAncestor(obj)
+	local cur = obj.Parent
+	while cur and cur ~= workspace do
+		local lower = string.lower(cur.Name)
+		for _, kw in ipairs(DecorKeywords) do
+			if string.find(lower, kw, 1, true) then
+				return true
+			end
+		end
+		cur = cur.Parent
+	end
+	return false
+end
+
+local function isSmallDecorPart(part: BasePart): boolean
+	if isInsidePlayerCharacter(part) then return false end
+	local nameLower = string.lower(part.Name)
+	if nameLower == "humanoidrootpart" or nameLower == "head" or nameLower == "baseplate" then
+		return false
+	end
+
+	local maxAxis = math.max(part.Size.X, part.Size.Y, part.Size.Z)
+	if hasDecorAncestor(part) and (not part.CanCollide or maxAxis <= Config.DecorMaxSize * 2) then
+		return true
+	end
+	if (not part.CanCollide) and maxAxis <= Config.DecorMaxSize then
+		return true
+	end
+	return false
+end
+
+local function optimizeObject(obj: Instance, backup)
+	if not obj or not obj.Parent then return end
+
+	if Config.DisableHeavyLight then
+		if obj:IsA("PostEffect") or obj:IsA("Atmosphere") or obj:IsA("Clouds") then
+			if backup.Light[obj] == nil then backup.Light[obj] = obj.Enabled end
+			pcall(function() obj.Enabled = false end)
+			return
+		elseif obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+			if backup.Light[obj] == nil then backup.Light[obj] = obj.Enabled end
+			pcall(function() obj.Enabled = false end)
+			return
+		end
+	end
+
+	if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+		or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+		if backup.Particles[obj] == nil then backup.Particles[obj] = obj.Enabled end
+		pcall(function() obj.Enabled = false end)
+	elseif obj:IsA("Decal") or obj:IsA("Texture") then
+		if backup.Decals[obj] == nil then backup.Decals[obj] = obj.Transparency end
+		pcall(function() obj.Transparency = 1 end)
+	elseif obj:IsA("BasePart") then
+		if Config.HideSmallDecor and isSmallDecorPart(obj) then
+			if backup.Hidden[obj] == nil then
+				backup.Hidden[obj] = {
+					LTM = obj.LocalTransparencyModifier,
+					CastShadow = obj.CastShadow,
+				}
+			end
+			pcall(function()
+				obj.LocalTransparencyModifier = 1
+				obj.CastShadow = false
+			end)
+		else
+			if Config.SimplifyMaterials and not isInsidePlayerCharacter(obj) then
+				if backup.Parts[obj] == nil then
+					backup.Parts[obj] = {
+						Material = obj.Material,
+						CastShadow = obj.CastShadow,
+					}
+				end
+				pcall(function()
+					obj.Material = Enum.Material.SmoothPlastic
+					obj.CastShadow = false
+				end)
+			elseif backup.Parts[obj] == nil then
+				backup.Parts[obj] = {
+					Material = obj.Material,
+					CastShadow = obj.CastShadow,
+				}
+				pcall(function() obj.CastShadow = false end)
+			end
+		end
+	end
+end
+
+local function applyFixLag(enabled: boolean)
+	if State.LagAddedConn then
+		State.LagAddedConn:Disconnect()
+		State.LagAddedConn = nil
+	end
+
+	if enabled then
+		if not State.LagBackup then
+			State.LagBackup = {
+				GlobalShadows = Lighting.GlobalShadows,
+				EnvSpec = Lighting.EnvironmentSpecularScale,
+				EnvDiff = Lighting.EnvironmentDiffuseScale,
+				Brightness = Lighting.Brightness,
+				Technology = nil,
+				Decoration = nil,
+				Particles = {},
+				Decals = {},
+				Light = {},
+				Hidden = {},
+				Parts = {},
+			}
+		end
+		local backup = State.LagBackup
+
+		pcall(function()
+			Lighting.GlobalShadows = false
+			Lighting.EnvironmentSpecularScale = 0
+			Lighting.EnvironmentDiffuseScale = 0
+			if Config.DisableHeavyLight then
+				Lighting.Brightness = math.min(Lighting.Brightness, 1.5)
+				if backup.Technology == nil then backup.Technology = Lighting.Technology end
+				Lighting.Technology = Enum.Technology.Compatibility
+			end
+		end)
+
+		local terrain = workspace:FindFirstChildOfClass("Terrain")
+		if terrain then
+			pcall(function()
+				if backup.Decoration == nil then backup.Decoration = terrain.Decoration end
+				terrain.Decoration = false
+			end)
+		end
+
+		if Config.DisableHeavyLight then
+			for _, child in ipairs(Lighting:GetChildren()) do
+				optimizeObject(child, backup)
+			end
+		end
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			optimizeObject(obj, backup)
+		end
+
+		State.LagAddedConn = trackConn(workspace.DescendantAdded:Connect(function(desc)
+			if Config.FixLagEnabled and State.LagBackup then
+				task.defer(function()
+					if Config.FixLagEnabled and State.LagBackup then
+						optimizeObject(desc, State.LagBackup)
+					end
+				end)
+			end
+		end))
+	else
+		local backup = State.LagBackup
+		if not backup then return end
+
+		pcall(function()
+			Lighting.GlobalShadows = backup.GlobalShadows
+			Lighting.EnvironmentSpecularScale = backup.EnvSpec
+			Lighting.EnvironmentDiffuseScale = backup.EnvDiff
+			Lighting.Brightness = backup.Brightness
+			if backup.Technology then Lighting.Technology = backup.Technology end
+		end)
+
+		local terrain = workspace:FindFirstChildOfClass("Terrain")
+		if terrain and backup.Decoration ~= nil then
+			pcall(function() terrain.Decoration = backup.Decoration end)
+		end
+
+		for obj, was in pairs(backup.Light) do
+			if obj and obj.Parent then pcall(function() obj.Enabled = was end) end
+		end
+		for obj, was in pairs(backup.Particles) do
+			if obj and obj.Parent then pcall(function() obj.Enabled = was end) end
+		end
+		for obj, oldT in pairs(backup.Decals) do
+			if obj and obj.Parent then pcall(function() obj.Transparency = oldT end) end
+		end
+		for part, pb in pairs(backup.Hidden) do
+			if part and part.Parent then
+				pcall(function()
+					part.LocalTransparencyModifier = pb.LTM
+					part.CastShadow = pb.CastShadow
+				end)
+			end
+		end
+		for part, pb in pairs(backup.Parts) do
+			if part and part.Parent then
+				pcall(function()
+					part.Material = pb.Material
+					part.CastShadow = pb.CastShadow
+				end)
+			end
+		end
+
+		State.LagBackup = nil
+	end
+end
+
+if Config.FixLagEnabled then
+	task.defer(function() applyFixLag(true) end)
+end
+
+-- ================= UNIVERSAL SHOOTER ENTITY SCANNER =================
+local CachedEntities = {}
+local lastEntityScan = 0
+local ENTITY_SCAN_INTERVAL = 0.15
+
+trackConn(workspace.DescendantAdded:Connect(function(desc)
+	if desc:IsA("Humanoid") or desc:IsA("Model") then
+		State.DirtyEntities = true
+	end
+end))
+trackConn(workspace.DescendantRemoving:Connect(function(desc)
+	if desc:IsA("Humanoid") or desc:IsA("Model") then
+		State.DirtyEntities = true
+	end
+end))
+
+local function getAimPart(char: Model): BasePart?
+	if not char or not char.Parent then return nil end
+	if Config.AimPart == "HumanoidRootPart" then
+		return char:FindFirstChild("HumanoidRootPart")
+			or char:FindFirstChild("UpperTorso")
+			or char:FindFirstChild("Torso")
+			or char:FindFirstChild("Head")
+	elseif Config.AimPart == "Torso" then
+		return char:FindFirstChild("UpperTorso")
+			or char:FindFirstChild("Torso")
+			or char:FindFirstChild("HumanoidRootPart")
+			or char:FindFirstChild("Head")
+	end
+	return char:FindFirstChild("Head")
+		or char:FindFirstChild("HumanoidRootPart")
+		or char:FindFirstChild("UpperTorso")
+		or char:FindFirstChild("Torso")
+end
+
+local function getAnchorRoot(char: Model): BasePart?
+	if not char or not char.Parent then return nil end
+	return char:FindFirstChild("HumanoidRootPart")
+		or char:FindFirstChild("UpperTorso")
+		or char:FindFirstChild("Torso")
+		or char:FindFirstChild("Head")
+		or char:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function isEntityValid(entity): boolean
+	if not entity or not entity.Char or not entity.Char.Parent then return false end
+	if LocalPlayer.Character and entity.Char == LocalPlayer.Character then return false end
+
+	local hum = entity.Hum
+	if hum and hum.Parent then
+		if hum.Health <= 0 then return false end
+	end
+
+	local aimPart = getAimPart(entity.Char)
+	local rootPart = getAnchorRoot(entity.Char)
+	return aimPart ~= nil and rootPart ~= nil
+end
+
+local function refreshEntities(force: boolean?)
+	local now = os.clock()
+	local shouldScan = force or State.DirtyEntities or ((now - lastEntityScan) >= ENTITY_SCAN_INTERVAL)
+	if not shouldScan then
+		return CachedEntities
+	end
+	lastEntityScan = now
+	State.DirtyEntities = false
+
+	local list = {}
+	local seenChars = {}
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and plr.Character and plr.Character.Parent then
+			local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+			list[#list + 1] = {
+				Key = plr,
+				Player = plr,
+				Char = plr.Character,
+				Hum = hum,
+				Name = plr.DisplayName or plr.Name,
+			}
+			seenChars[plr.Character] = true
+		end
+	end
+
+	local cam = getCamera()
+	local camPos = cam and cam.CFrame.Position or Vector3.zero
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Humanoid") and obj.Parent and obj.Parent:IsA("Model") then
+			local char = obj.Parent
+			if not seenChars[char] and char ~= LocalPlayer.Character and obj.Health > 0 then
+				local root = getAnchorRoot(char)
+				if root and (root.Position - camPos).Magnitude <= Config.ESPMaxDist then
+					list[#list + 1] = {
+						Key = char,
+						Player = nil,
+						Char = char,
+						Hum = obj,
+						Name = char.Name,
+					}
+					seenChars[char] = true
+				end
+			end
+		end
+	end
+
+	CachedEntities = list
+	return CachedEntities
+end
+
+-- ================= STEADY LOCK & TRAJECTORY PREDICTION AIM CORE =================
+local function isVisible(targetPart: BasePart, targetChar: Model): boolean
+	local camera = getCamera()
+	if not camera or not targetPart then return false end
+
+	local origin = camera.CFrame.Position
+	local goalPos = targetPart.Position
+	local delta = goalPos - origin
+	local dist = delta.Magnitude
+	if dist <= 0.1 then return true end
+
+	local direction = delta
+	local ignoreList = {}
+	if LocalPlayer.Character then table.insert(ignoreList, LocalPlayer.Character) end
+	if targetChar then table.insert(ignoreList, targetChar) end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.Ra
